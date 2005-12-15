@@ -7,20 +7,21 @@
 #include <err.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sysexits.h>
 #include <unistd.h>
 
-#define QFIL ".q"
+#define QBASENAME ".q"
 
-void  parsein(FILE *);
-FILE *gethandle(int);
-void  puthandle(FILE *);
-void  sync(void);
-void  clear(void);
-void  usage(void) __attribute__((__noreturn__));
+void		 parsein(FILE *);
+FILE		*gethandle(int);
+void		 puthandle(FILE *);
+void		 sync(void);
+void		 clear(void);
+__dead void	 usage(void);
 
 struct act {
 	char *cmd;
@@ -32,14 +33,14 @@ struct act {
 };
 
 struct fil_rec {
-	char			*fn;
-	SLIST_ENTRY(fil_rec)	 next;
+	char			*fr_fn;
+	SLIST_ENTRY(fil_rec)	 fr_next;
 };
 
 struct tm_rec {
-	time_t			 tm;
-	SLIST_HEAD(, fil_rec)	 fh;
-	SLIST_ENTRY(tm_rec)	 next;
+	time_t			 tr_tm;
+	SLIST_HEAD(, fil_rec)	 tr_fh;
+	SLIST_ENTRY(tm_rec)	 tr_next;
 };
 
 char *cvsroot = NULL;
@@ -48,6 +49,7 @@ char qfn[MAXPATHLEN];
 int
 main(int argc, char *argv[])
 {
+	struct passwd *pwd;
 	struct act *t;
 	char *home;
 	int c;
@@ -64,15 +66,18 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	if ((home = getenv("HOME")) == NULL)
-		home = "";
+	if ((home = getenv("HOME")) == NULL) {
+		if ((pwd = getpwuid(getuid())) == NULL)
+			home = ".";
+		else
+			home = pwd->pw_dir;
+	}
 	(void)strlcpy(qfn, home, sizeof(qfn));
 	(void)strlcat(qfn, "/", sizeof(qfn));
-	(void)strlcpy(qfn, QFIL, sizeof(qfn));
-
+	(void)strlcat(qfn, QBASENAME, sizeof(qfn));
 	if (argc) {
 		for (t = acts; t->cmd != NULL; t++) {
-			if (strcasecmp(argv[0], t->cmd) == 0) {
+			if (strcmp(argv[0], t->cmd) == 0) {
 				t->func();
 				break;
 			}
@@ -91,11 +96,11 @@ parsein(FILE *fp)
 	FILE *outfp;
 	time_t tm;
 
-	outfp = gethandle(LOCK_EX);
-
 	strlcpy(dir, "", sizeof(dir));	/* shouldn't be needed */
 
 	tm = time(NULL);
+	outfp = gethandle(LOCK_EX);
+	fseek(outfp, 0, SEEK_END);
 	while ((ent = fgets(buf, sizeof(buf), fp)) != NULL) {
 		if ((p = strchr(ent, ':')) != NULL) {
 			*p = '\0';
@@ -128,54 +133,67 @@ clear(void)
 void
 sync(void)
 {
-	char cmd[BUFSIZ], *fn, buf[BUFSIZ], tmbuf[BUFSIZ];
-	SLIST_HEAD(, tm_rec) tmh;
-	struct tm_rec *tmr;
+	char *s, cmd[BUFSIZ], *fn, buf[BUFSIZ];
+	char tmbuf[BUFSIZ], tmbuf2[BUFSIZ];
+	SLIST_HEAD(, tm_rec) th;
 	struct fil_rec *fr;
-	time_t tm;
+	struct tm_rec *tr;
+	struct tm *tm;
+	time_t time;
 	FILE *fp;
 
-	SLIST_INIT(&tmh);
-
+	SLIST_INIT(&th);
 	fp = gethandle(LOCK_SH);
-	while (fgets(buf, sizeof(fp), fp) != NULL) {
+	while (fgets(buf, sizeof(buf), fp) != NULL) {
+		if ((s = strchr(buf, '\n')) != NULL)
+			*s = '\0';
 		if ((fn = strchr(buf, ' ')) == NULL)
-			errx(1, "qfile: bad file format");
+			errx(1, "%s: bad file format: %s", qfn, buf);
 		*fn++ = '\0';
-		tm = strtoul(buf, NULL, 0);
-		SLIST_FOREACH(tmr, &tmh, next)
-			if (tmr->tm == tm)
+		time = (time_t)strtoul(buf, NULL, 10);
+		SLIST_FOREACH(tr, &th, tr_next)
+			if (tr->tr_tm == time)
 				break;
-		if (tmr == NULL) {
-			if ((tmr = malloc(sizeof(*tmr))) == NULL)
+		if (tr == NULL) {
+			if ((tr = malloc(sizeof(*tr))) == NULL)
 				err(1, "malloc");
-			tmr->tm = tm;
-			SLIST_INSERT_HEAD(&tmh, tmr, next);
-			SLIST_INIT(&tmr->fh);
+			tr->tr_tm = time;
+			SLIST_INSERT_HEAD(&th, tr, tr_next);
+			SLIST_INIT(&tr->tr_fh);
 		}
-		if ((fn = strdup(fn)) == NULL)
-			err(1, "strdup");
 		if ((fr = malloc(sizeof(*fr))) == NULL)
 			err(1, "malloc");
-		SLIST_INSERT_HEAD(&tmr->fh, fr, next);
+		if ((fr->fr_fn = strdup(fn)) == NULL)
+			err(1, "strdup");
+		SLIST_INSERT_HEAD(&tr->tr_fh, fr, fr_next);
 	}
 	puthandle(fp);
 
-	SLIST_FOREACH(tmr, &tmh, next) {
-		tmr->tm--;
-		(void)strlcpy(tmbuf, ctime(&tmr->tm), sizeof(tmbuf));
-		tmr->tm += 2;
+	SLIST_FOREACH(tr, &th, tr_next) {
+		tr->tr_tm -= 12 * 60 * 60;
+		tm = localtime(&tr->tr_tm);
+		(void)strftime(tmbuf, sizeof(tmbuf),
+		    "%b %e, %Y %H:%M", tm);
+
+		tr->tr_tm += 13 * 60 * 60;
+		tm = localtime(&tr->tr_tm);
+		(void)strftime(tmbuf2, sizeof(tmbuf2),
+		    "%b %e, %Y %H:%M", tm);
+
 		(void)snprintf(cmd, sizeof(cmd),
-		    "cvs %s %s -D %s -D %s",
+		    "cvs %s %s -D '%s' -D '%s'",
 		    cvsroot == NULL ? "" : "-d",
 		    cvsroot == NULL ? "" : cvsroot,
-		    tmbuf, ctime(&tmr->tm));
-		SLIST_FOREACH(fr, &tmr->fh, next) {
+		    tmbuf, tmbuf2);
+
+		SLIST_FOREACH(fr, &tr->tr_fh, fr_next) {
+printf("processing %s\n", fr->fr_fn);
 			(void)strlcat(cmd, " ", sizeof(cmd));
-			(void)strlcat(cmd, fr->fn, sizeof(cmd));
+			(void)strlcat(cmd, fr->fr_fn, sizeof(cmd));
 		}
-		(void)system(cmd);
-		(void)sleep(1);
+		(void)printf("%s\n", cmd);
+		if (SLIST_NEXT(tr, tr_next))
+			(void)sleep(1);
 	}
 }
 
@@ -216,18 +234,17 @@ listq(void)
 FILE *
 gethandle(int op)
 {
-	char fn[MAXPATHLEN];
 	FILE *fp;
 
 	if ((fp = fopen(qfn, "r+")) == NULL) {
-		if (errno == ENOENT) {
-			if ((fp = fopen(fn, "w+")) == NULL)
-				err(EX_OSERR, "%s", fn);
+		if (errno == ENOENT && op == LOCK_EX) {
+			if ((fp = fopen(qfn, "w+")) == NULL)
+				err(EX_OSERR, "%s", qfn);
 		} else
-			err(EX_OSERR, "%s", fn);
+			err(EX_OSERR, "%s", qfn);
 	}
 	if (flock(fileno(fp), op | LOCK_NB) == -1)
-		err(EX_OSERR, "flock %s", fn);
+		err(EX_OSERR, "flock");
 	return (fp);
 }
 
