@@ -1,7 +1,7 @@
 # $Id$
 
-PROG = q
-SRCS = q.c
-NOMAN = 1
+PROG=		q
+NOMAN=		1
+CFLAGS+=	-Wall -W
 
 .include <bsd.prog.mk>
